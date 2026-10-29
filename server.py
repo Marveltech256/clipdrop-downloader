@@ -1,4 +1,4 @@
-import json, os, re, secrets, subprocess, sys, threading
+import copy, json, os, re, secrets, subprocess, sys, threading, time
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
@@ -10,6 +10,29 @@ DOWNLOADS.mkdir(exist_ok=True)
 JOBS = {}
 LOCK = threading.Lock()
 CHOICES = {}
+CACHE = {}
+EXTRACT_LOCK = threading.Lock()
+
+def client_error(error):
+    message = str(error)
+    if 'confirm you' in message.lower() and 'bot' in message.lower():
+        return {'error': 'YouTube requires verification from this download server. Please try again later, or use ClipDrop on your computer for this video. Signing in on this webpage will not authenticate the download server.', 'code': 'YOUTUBE_VERIFICATION_REQUIRED'}
+    if 'sign in' in message.lower() or 'cookies' in message.lower():
+        return {'error': 'YouTube requires authentication for this video. The server administrator must configure a valid YouTube session before it can be downloaded.', 'code': 'YOUTUBE_AUTH_REQUIRED'}
+    return {'error': re.sub(r'\x1b\[[0-9;]*m', '', message), 'code': 'DOWNLOAD_FAILED'}
+
+def extract_video(url):
+    import yt_dlp
+    with EXTRACT_LOCK:
+        cached = CACHE.get(url)
+        if cached and time.monotonic() - cached[0] < 300:
+            return cached[1]
+        with yt_dlp.YoutubeDL(options()) as ydl:
+            info = ydl.extract_info(url, download=False)
+        if info.get('is_live'): raise ValueError('Live streams are not supported. Please use a finished video.')
+        if len(CACHE) >= 20: CACHE.clear()
+        CACHE[url] = (time.monotonic(), info)
+        return info
 
 def available_formats(info):
     result = []
@@ -50,12 +73,18 @@ def video_url(value):
     return 'https://www.youtube.com/watch?v=' + vid
 
 def options():
-    return {'noplaylist': True, 'quiet': True, 'no_warnings': True, 'socket_timeout': 20, 'retries': 2, 'cachedir': False, 'js_runtimes': {'node': {}}}
+    opts = {'noplaylist': True, 'quiet': True, 'no_warnings': True, 'socket_timeout': 20, 'retries': 1, 'cachedir': False, 'js_runtimes': {'node': {}}}
+    cookie_path = os.environ.get('YOUTUBE_COOKIE_FILE')
+    if cookie_path:
+        if not Path(cookie_path).is_file(): raise ValueError('The configured YouTube session file is unavailable. Contact the server administrator.')
+        opts['cookiefile'] = cookie_path
+    return opts
 
 def download(job_id, url, choice):
     try:
         import yt_dlp
         import imageio_ffmpeg
+        info = copy.deepcopy(extract_video(url))
         opts = options() | {'format': choice['selector'], 'merge_output_format': choice['ext'], 'ffmpeg_location': imageio_ffmpeg.get_ffmpeg_exe(), 'outtmpl': str(DOWNLOADS / (job_id + '.%(ext)s')), 'max_filesize': 1024**3}
         def progress(d):
             with LOCK:
@@ -69,7 +98,7 @@ def download(job_id, url, choice):
                 final_paths.append(d['info_dict']['filepath'])
         opts['postprocessor_hooks'] = [postprocess]
         with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+            info = ydl.process_ie_result(info, download=True)
             path = Path(final_paths[-1] if final_paths else ydl.prepare_filename(info))
             if not path.is_file():
                 path = DOWNLOADS / (job_id + '.' + choice['ext'])
@@ -78,7 +107,7 @@ def download(job_id, url, choice):
             JOBS[job_id].update(status='ready', path=str(path), filename=re.sub(r'[^\w .-]', '', info.get('title','video'))[:120] + path.suffix)
     except Exception as e:
         with LOCK:
-            JOBS[job_id].update(status='error', error=str(e))
+            JOBS[job_id].update(status='error', **client_error(e))
 
 class Handler(SimpleHTTPRequestHandler):
     def authorized(self):
@@ -99,7 +128,7 @@ class Handler(SimpleHTTPRequestHandler):
             body = json.loads(self.rfile.read(size)); url = video_url(body.get('url',''))
             import yt_dlp
             if self.path == '/api/info':
-                with yt_dlp.YoutubeDL(options()) as ydl: info = ydl.extract_info(url, download=False)
+                info = extract_video(url)
                 with LOCK:
                     if len(CHOICES) > 10000: CHOICES.clear()
                     formats = available_formats(info)
@@ -114,7 +143,9 @@ class Handler(SimpleHTTPRequestHandler):
                 threading.Thread(target=download,args=(jid,url,choice),daemon=True).start()
                 return self.reply({'id':jid})
             self.reply({'error':'Not found'},404)
-        except Exception as e: self.reply({'error':str(e)},400)
+        except Exception as e:
+            error = client_error(e)
+            self.reply(error, 503 if error['code'].startswith('YOUTUBE_') else 400)
     def do_GET(self):
         path = urlparse(self.path).path
         if path == '/api/health': return self.reply({'ready':True})

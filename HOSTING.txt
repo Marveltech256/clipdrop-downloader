@@ -13,8 +13,13 @@ Backend setup:
    as Netlify Functions environment variables, then redeploy Netlify.
 5. Verify /api/health and a complete merged download on the public site.
 
-No backend hosting account has been connected or provisioned yet.
-The online UI shows setup status until the backend is connected.
+Render is connected to Atalyeba's workspace. The backend is deployed at:
+https://clipdrop-downloader-api.onrender.com
+Render service ID: srv-dbhijlgu01pc73be6cs0
+Source repository:
+https://github.com/Marveltech256/clipdrop-downloader
+The Netlify page and API proxy are published and connected. Backend credentials
+are stored in provider environment variables, not in these source files.
 Keep one backend instance: job state is currently in memory. Files use
 ephemeral disk and are lost on restart. Add quotas, expiry and durable
 job storage before operating this as a high-volume public service.
@@ -23,3 +28,13 @@ SEO includes canonical URL, metadata, crawlable FAQs, WebSite structured
 data, social previews, sitemap.xml, robots.txt and a noindex 404 page.
 Google rankings and indexing are not guaranteed. Add a custom domain and
 verify ownership in Google Search Console to submit sitemap.xml.
+
+YouTube verification:
+If YouTube requires sign-in or bot verification, browser sign-in on the
+Netlify website cannot authenticate the Render server. The administrator
+can optionally configure a Netscape-format YouTube cookie file as a Render
+secret file and set YOUTUBE_COOKIE_FILE to its absolute runtime path.
+Keep cookie contents out of chat, repositories, static assets and logs.
+Use only a session you control and understand that yt-dlp warns account
+use can risk suspension. A cookie session may expire or still be rejected.
+The local app can work for videos blocked from a hosting-provider network.
