@@ -1,4 +1,22 @@
 const $ = id => document.getElementById(id);
+if ($('copy-uid')) $('copy-uid').addEventListener('click', async () => {
+  try { await navigator.clipboard.writeText('315202714'); $('copy-status').textContent = 'UID copied. Check the recipient in Binance before sending.'; }
+  catch { $('copy-status').textContent = 'Copy this receiving UID: 315202714'; }
+});
+if ($('donation-receipt')) $('donation-receipt').addEventListener('submit', async event => {
+  event.preventDefault();
+  const message = $('receipt-status');
+  if (['localhost','127.0.0.1'].includes(location.hostname)) { message.textContent = 'Receipt submissions are available on the online ClipDrop website.'; return; }
+  $('send-receipt').disabled = true;
+  message.textContent = 'Submitting your reference…';
+  try {
+    const response = await fetch('/', {method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams(new FormData(event.target)).toString()});
+    if (!response.ok) throw Error('The receipt could not be submitted. Please try again later.');
+    message.textContent = 'Receipt submitted for manual review. This is not payment confirmation. Thank you!';
+    event.target.reset();
+  } catch (error) { message.textContent = error.message; }
+  finally { $('send-receipt').disabled = false; }
+});
 let video, busy = false;
 if (location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
   $('fetch').disabled = true;
@@ -48,7 +66,7 @@ $('download').addEventListener('click', async () => {
       $('bar').style.width = Math.min(100, state.progress || 0) + '%';
       if (state.status === 'ready') {
         $('save').href = '/api/files/' + job.id; $('save').download = state.filename; $('save').hidden = false; $('download').hidden = true;
-        status('Your video is ready. Click Save video to save it to your device.'); break;
+        status('Your video is ready. Save it within 10 minutes. This link can be used once.'); break;
       }
       status(state.phase || `Downloading… ${Math.min(100, state.progress || 0)}%`);
     }

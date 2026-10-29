@@ -104,7 +104,7 @@ def download(job_id, url, choice):
                 path = DOWNLOADS / (job_id + '.' + choice['ext'])
             if not path.is_file(): raise ValueError('The downloaded file could not be found.')
         with LOCK:
-            JOBS[job_id].update(status='ready', path=str(path), filename=re.sub(r'[^\w .-]', '', info.get('title','video'))[:120] + path.suffix)
+            JOBS[job_id].update(status='ready', path=str(path), filename=re.sub(r'[^\w .-]', '', info.get('title','video'))[:120] + path.suffix, expires_at=time.time()+600, used=False)
     except Exception as e:
         with LOCK:
             JOBS[job_id].update(status='error', **client_error(e))
@@ -155,8 +155,12 @@ class Handler(SimpleHTTPRequestHandler):
             job.pop('path',None)
             return self.reply(job,200 if job else 404)
         if path.startswith('/api/files/'):
-            with LOCK: job = dict(JOBS.get(path.split('/')[-1],{}))
-            if job.get('status') != 'ready': return self.reply({'error':'File not ready'},404)
+            with LOCK:
+                job = dict(JOBS.get(path.split('/')[-1],{}))
+                if job.get('status') != 'ready': return self.reply({'error':'File not ready'},404)
+                if job.get('used') or time.time() > job.get('expires_at',0):
+                    return self.reply({'error':'This one-use download link has expired or was already used. Fetch the video again to prepare a new download.'},410)
+                JOBS[path.split('/')[-1]]['used'] = True
             file = Path(job['path'])
             self.send_response(200); self.send_header('Content-Type','application/octet-stream'); self.send_header('Content-Disposition','attachment; filename="' + job['filename'].encode('ascii','ignore').decode().replace('"','') + '"'); self.send_header('Content-Length',str(file.stat().st_size)); self.end_headers()
             try:
