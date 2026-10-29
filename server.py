@@ -1,4 +1,4 @@
-import copy, json, os, re, secrets, subprocess, sys, threading, time
+import contextlib, copy, ipaddress, json, os, re, secrets, socket, subprocess, sys, threading, time
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
@@ -12,6 +12,26 @@ LOCK = threading.Lock()
 CHOICES = {}
 CACHE = {}
 EXTRACT_LOCK = threading.Lock()
+NETWORK_CONTEXT = threading.local()
+SYSTEM_GETADDRINFO = socket.getaddrinfo
+
+def public_addresses(host, port=443, *args, **kwargs):
+    addresses = SYSTEM_GETADDRINFO(host, port, *args, **kwargs)
+    if not addresses or any(not ipaddress.ip_address(a[4][0].split('%')[0]).is_global for a in addresses):
+        raise ValueError('Only public internet video URLs are supported. Private network addresses are blocked.')
+    return addresses
+
+def guarded_getaddrinfo(host, port, *args, **kwargs):
+    return public_addresses(host, port, *args, **kwargs) if getattr(NETWORK_CONTEXT, 'active', False) else SYSTEM_GETADDRINFO(host, port, *args, **kwargs)
+
+socket.getaddrinfo = guarded_getaddrinfo
+
+@contextlib.contextmanager
+def public_network():
+    before = getattr(NETWORK_CONTEXT, 'active', False)
+    NETWORK_CONTEXT.active = True
+    try: yield
+    finally: NETWORK_CONTEXT.active = before
 
 def client_error(error):
     message = str(error)
@@ -23,32 +43,40 @@ def client_error(error):
 
 def extract_video(url):
     import yt_dlp
-    with EXTRACT_LOCK:
+    with EXTRACT_LOCK, public_network():
         cached = CACHE.get(url)
         if cached and time.monotonic() - cached[0] < 300:
             return cached[1]
         with yt_dlp.YoutubeDL(options()) as ydl:
             info = ydl.extract_info(url, download=False)
         if info.get('is_live'): raise ValueError('Live streams are not supported. Please use a finished video.')
+        if info.get('_type') in ('playlist','multi_video') or info.get('entries') is not None:
+            raise ValueError('Use a link to one video, rather than a playlist or profile.')
+        if not info.get('formats') and info.get('url'):
+            info['formats'] = [dict(info, format_id=info.get('format_id') or 'source')]
         if len(CACHE) >= 20: CACHE.clear()
         CACHE[url] = (time.monotonic(), info)
         return info
 
-def available_formats(info):
+def available_formats(info, source_url=None):
     result = []
     for f in info.get('formats', []):
-        if f.get('has_drm') or not f.get('url') or f.get('ext') not in ('mp4', 'webm', 'm4a', 'mp3', 'ogg', 'opus'):
+        if urlparse(f.get('url','')).scheme not in ('http','https') or f.get('protocol') not in (None,'http','https','m3u8_native','m3u8','http_dash_segments'):
             continue
-        has_video = f.get('vcodec') not in (None, 'none')
-        has_audio = f.get('acodec') not in (None, 'none')
+        if f.get('has_drm') or not f.get('url') or f.get('ext') not in ('mp4', 'webm', 'm4a', 'mp3', 'ogg', 'opus', 'mov', 'mkv', 'avi', 'flv', 'wav', 'aac'):
+            continue
+        unknown_tracks = f.get('vcodec') is None and f.get('acodec') is None
+        has_video = f.get('vcodec') not in (None, 'none') or (unknown_tracks and f.get('ext') in ('mp4','webm','mov','mkv','avi','flv'))
+        has_audio = f.get('acodec') not in (None, 'none') or unknown_tracks
         if not has_video and not has_audio:
             continue
         fid = f['format_id']
         ext = f['ext']
         selector = fid
         kind = 'Video + audio' if has_video else 'Audio only'
+        if unknown_tracks and has_video: kind = 'Video (source audio)'
         if has_video and not has_audio:
-            audio = [a for a in info.get('formats', []) if a.get('vcodec') == 'none' and a.get('acodec') not in (None, 'none') and a.get('url') and not a.get('has_drm')]
+            audio = [a for a in info.get('formats', []) if a.get('vcodec') == 'none' and a.get('acodec') not in (None, 'none') and urlparse(a.get('url','')).scheme in ('http','https') and a.get('protocol') in (None,'http','https','m3u8_native','m3u8','http_dash_segments') and not a.get('has_drm')]
             compatible = [a for a in audio if a.get('ext') == ('m4a' if ext == 'mp4' else 'webm')]
             audio = compatible or audio
             if audio:
@@ -58,22 +86,25 @@ def available_formats(info):
             else:
                 kind = 'Video only (no audio available)'
         key = secrets.token_hex(12)
-        CHOICES[key] = {'url': info['webpage_url'], 'selector': selector, 'ext': ext}
-        result.append({'id': key, 'height': f.get('height') or 0, 'ext': ext, 'size': f.get('filesize') or f.get('filesize_approx') if '+' not in selector else None, 'fps': f.get('fps'), 'kind': kind, 'codec': (f.get('vcodec') if has_video else f.get('acodec') or '').split('.')[0], 'bitrate': round(f.get('abr') or f.get('tbr') or 0), 'source_id': fid})
+        CHOICES[key] = {'url': source_url or info['webpage_url'], 'selector': selector, 'ext': ext}
+        result.append({'id': key, 'height': f.get('height') or 0, 'ext': ext, 'size': f.get('filesize') or f.get('filesize_approx') if '+' not in selector else None, 'fps': f.get('fps'), 'kind': kind, 'codec': ((f.get('vcodec') if has_video else f.get('acodec')) or 'source').split('.')[0], 'bitrate': round(f.get('abr') or f.get('tbr') or 0), 'source_id': fid})
     result.sort(key=lambda f: (f['height'], f['fps'] or 0, f['bitrate']), reverse=True)
     return result
 
 def video_url(value):
+    if not isinstance(value,str) or len(value)>3000: raise ValueError('Paste a valid public video URL.')
     u = urlparse(value.strip())
-    if u.scheme not in ('https', 'http') or u.hostname not in ('youtube.com','www.youtube.com','m.youtube.com','youtu.be','www.youtu.be'):
-        raise ValueError('Paste a valid YouTube video link.')
-    vid = u.path.strip('/') if u.hostname.endswith('youtu.be') else (parse_qs(u.query).get('v', [''])[0] if u.path == '/watch' else u.path.split('/')[-1] if u.path.startswith(('/shorts/', '/live/', '/embed/')) else '')
-    if not re.fullmatch(r'[A-Za-z0-9_-]{11}', vid):
-        raise ValueError('This link does not contain a valid YouTube video ID.')
-    return 'https://www.youtube.com/watch?v=' + vid
+    if u.scheme not in ('https', 'http') or not u.hostname or u.username or u.password or u.port not in (None,80,443):
+        raise ValueError('Use a public HTTP or HTTPS video URL without login details or custom ports.')
+    public_addresses(u.hostname,u.port or (443 if u.scheme=='https' else 80))
+    if u.hostname in ('youtube.com','www.youtube.com','m.youtube.com','youtu.be','www.youtu.be'):
+        vid = u.path.strip('/') if u.hostname.endswith('youtu.be') else (parse_qs(u.query).get('v', [''])[0] if u.path == '/watch' else u.path.split('/')[-1] if u.path.startswith(('/shorts/', '/live/', '/embed/')) else '')
+        if not re.fullmatch(r'[A-Za-z0-9_-]{11}',vid): raise ValueError('Use a link to one YouTube video or Short.')
+        return 'https://www.youtube.com/watch?v='+vid
+    return u._replace(fragment='').geturl()
 
 def options():
-    opts = {'noplaylist': True, 'quiet': True, 'no_warnings': True, 'socket_timeout': 20, 'retries': 1, 'cachedir': False, 'js_runtimes': {'node': {}}}
+    opts = {'noplaylist': True, 'quiet': True, 'no_warnings': True, 'socket_timeout': 20, 'retries': 1, 'cachedir': False, 'js_runtimes': {'node': {}}, 'enable_file_urls': False, 'proxy': '', 'hls_prefer_native': True}
     cookie_path = os.environ.get('YOUTUBE_COOKIE_FILE')
     if cookie_path:
         if not Path(cookie_path).is_file(): raise ValueError('The configured YouTube session file is unavailable. Contact the server administrator.')
@@ -97,7 +128,7 @@ def download(job_id, url, choice):
             if d['status'] == 'finished' and d.get('info_dict', {}).get('filepath'):
                 final_paths.append(d['info_dict']['filepath'])
         opts['postprocessor_hooks'] = [postprocess]
-        with yt_dlp.YoutubeDL(opts) as ydl:
+        with yt_dlp.YoutubeDL(opts) as ydl, public_network():
             info = ydl.process_ie_result(info, download=True)
             path = Path(final_paths[-1] if final_paths else ydl.prepare_filename(info))
             if not path.is_file():
@@ -131,8 +162,12 @@ class Handler(SimpleHTTPRequestHandler):
                 info = extract_video(url)
                 with LOCK:
                     if len(CHOICES) > 10000: CHOICES.clear()
-                    formats = available_formats(info)
-                return self.reply({'title':info.get('title'),'channel':info.get('uploader'),'duration':info.get('duration'),'thumbnail':info.get('thumbnail'),'formats':formats,'url':url})
+                    formats = available_formats(info,url)
+                thumbnail = info.get('thumbnail')
+                if thumbnail:
+                    try: thumbnail = video_url(thumbnail)
+                    except (ValueError,OSError): thumbnail = None
+                return self.reply({'title':info.get('title'),'channel':info.get('uploader'),'duration':info.get('duration'),'thumbnail':thumbnail,'formats':formats,'url':url,'site':info.get('extractor_key','Video')})
             if self.path == '/api/download':
                 fmt = str(body.get('format',''))
                 with LOCK:

@@ -31,10 +31,16 @@ $('form').addEventListener('submit', async event => {
     }));
     $('download').disabled = !video.formats.length; $('download').hidden = false; $('save').hidden = true; $('progress').hidden = true;
     $('result').hidden = false;
-    status(video.formats.length ? 'Choose a format. Separate video and audio tracks are merged automatically.' : 'YouTube did not return any downloadable streams. The video may be restricted or temporarily blocked.', !video.formats.length);
+    status(video.formats.length ? 'Choose a format. Separate video and audio tracks are merged automatically when available.' : 'This page did not return any downloadable video or audio formats. It may be unsupported, restricted, or temporarily blocked.', !video.formats.length);
   } catch (e) { status(e.message, true); }
   finally { busy = false; $('fetch').disabled = false; $('fetch').textContent = 'Fetch video →'; }
 });
+const incoming = new URLSearchParams(location.search).get('url');
+if (incoming && /^https?:\/\//i.test(incoming) && incoming.length <= 3000) {
+  $('url').value = incoming;
+  status('Link received from the extension. Click Fetch video to choose a format.');
+  history.replaceState(null, '', location.pathname);
+}
 $('download').addEventListener('click', async () => {
   if (busy || !video) return;
   busy = true; $('download').disabled = true; $('fetch').disabled = true; $('progress').hidden = false; $('bar').style.width = '0%';
