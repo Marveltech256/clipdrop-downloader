@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: clipdrop-downloader-api
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: API_TOKEN
+        generateValue: true

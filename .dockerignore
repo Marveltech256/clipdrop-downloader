@@ -1,0 +1,5 @@
+.deps
+.netlify
+downloads
+__pycache__
+.env

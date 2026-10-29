@@ -1,0 +1,25 @@
+Netlify project: clipdrop-video-downloader
+Site ID: ecb66257-cf2f-4635-86ea-a0ee90072194
+
+The Netlify site hosts the page and an authenticated proxy. The Python
+downloader is packaged separately in Dockerfile and render.yaml.
+
+Backend setup:
+1. Deploy this folder as a Docker web service on a Python/Docker host.
+   render.yaml is an optional Render Blueprint (single instance).
+2. Set BIND_HOST=0.0.0.0 and PORT to the host's required port.
+3. Set API_TOKEN to a long randomly generated secret. Keep it private.
+4. Set BACKEND_URL (HTTPS origin) and BACKEND_API_TOKEN (same secret)
+   as Netlify Functions environment variables, then redeploy Netlify.
+5. Verify /api/health and a complete merged download on the public site.
+
+No backend hosting account has been connected or provisioned yet.
+The online UI shows setup status until the backend is connected.
+Keep one backend instance: job state is currently in memory. Files use
+ephemeral disk and are lost on restart. Add quotas, expiry and durable
+job storage before operating this as a high-volume public service.
+
+SEO includes canonical URL, metadata, crawlable FAQs, WebSite structured
+data, social previews, sitemap.xml, robots.txt and a noindex 404 page.
+Google rankings and indexing are not guaranteed. Add a custom domain and
+verify ownership in Google Search Console to submit sitemap.xml.
